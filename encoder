@@ -1,0 +1,475 @@
+%% JPEG-LS encoder part
+
+% image pixel
+image = zeros(1,16);
+% image size
+width = 4;
+height = 4;
+size = width * height;
+
+%% step1, initialisation
+%(a) assign default parameter values
+SOI = 0;
+SOF = 0;
+length_marker = 0;
+P = 08;
+
+
+% (b) initialise the non-defined samples of the causal template
+NEAR = 0;
+MAXVAL = 255;
+SIGN = 1;
+% compute the parameter
+RANGE = MAXVAL + 1;
+qbpp = 8;
+bpp = 8;
+LIMIT = 32;
+% (d) for context Q, initialise four variables
+A = 4*ones(1,367);
+B = zeros(1,365);
+C = zeros(1,365);
+N = ones(1,367);
+Nn = zeros(1,2);   % run interruption variables
+RESET = 64;
+T1 = 3;   T2 = 7;   T3 = 21;
+% initialise the variables for run mode
+RUNindex = 1;      % index in J
+RUNcnt = 0;
+J = [0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3, ...
+    4,4,5,5,6,6,7,7,8,9,10,11,12,13,14,15];
+% set current sample to the first sample in the source image
+Ra = 0;
+Rb = 0;
+Rc = 0;
+Ra_before = 0;
+RUNval = Ra;
+
+MIN_C = -128;
+MAX_C = 127;
+
+mode = 0;
+Q = zeros(1,3);
+% k = 0;         % parameter k, wait to change
+encode_sequence = char.empty;
+
+i = 1;
+
+while i <= size
+    %% some parameter need to change
+    Ix = image(i);
+    if i <= width
+        Rb = 0;   Rc = 0;   Rd = 0;
+        if (mod(i,width) == 1)
+            Ra = Rb;
+        else
+            Ra = image(i-1);
+        end
+    else
+        if (mod(i,width) == 1)
+            Rb = image(i - width);
+            Ra = Rb;
+            Rc = Ra_before;
+            Ra_before = Ra;
+            Rd = image(i - width + 1);
+        elseif (mod(i,width) == 0)
+            Ra = image(i - 1);
+            Rb = image(i - width);
+            Rc = image(i - width - 1);
+            Rd = Rb;
+        else
+            Ra = image(i - 1);
+            Rb = image(i - width);
+            Rc = image(i - width - 1);
+            Rd = image(i - width + 1);
+        end
+    end
+    
+    %% step2, compute the local gradients according to A1
+    D(1) = Rd - Rb;
+    D(2) = Rb - Rc;
+    D(3) = Rc - Ra;
+    
+    %% step 3, select the coding mode following A2
+    if ((abs(D(1))<= NEAR) && (abs(D(2))<= NEAR) && (abs(D(3))<= NEAR))
+        mode = 1;           % run mode
+    else
+        mode = 0;           % regular mode
+    end
+    
+    %% regular mode
+    if mode == 0
+        
+        %% step 4, quantize the local gradients according to A4
+        for j = 1:3
+            if D(j) <= -T3
+                Q(j) = -4;
+            elseif D(j) <= -T2
+                Q(j) = -3;
+            elseif D(j) <= -T1
+                Q(j) = -2;
+            elseif D(j) < -NEAR
+                Q(j) = -1;
+            elseif D(j) <= NEAR
+                Q(j) = 0;
+            elseif D(j) < T1
+                Q(j) = 1;
+            elseif D(j) < T2
+                Q(j) = 2;
+            elseif D(j) < T3
+                Q(j) = 3;
+            else
+                Q(j) = 4;
+            end
+        end
+        
+        %% step 5, check and change if necessary: if the first non-zero
+        % element of the vector (Q1,Q2,Q3) is negative, then the vector
+        % (Q1, Q2, Q3) shall be reversed to obtain (–Q1, –Q2, –Q3)
+        % and SIGN = -1. Otherwise, SIGN = 1.  A3.4
+        if Q(1) < 0
+            SIGN = -1;
+        elseif Q(1) > 0
+            SIGN = 1;
+        elseif Q(2) < 0
+            SIGN = -1;
+        elseif Q(2) > 0
+            SIGN = 1;
+        elseif Q(3) < 0
+            SIGN = -1;
+        elseif Q(3) > 0
+            SIGN = 1;
+        else
+            SIGN = 1;
+        end
+        
+        % if SIGN = -1, reverse Q(1),Q(2) and Q(3)
+        if SIGN == -1
+            Q(1) = -Q(1); Q(2) = -Q(2);  Q(3) = -Q(3);
+        end
+        
+        % Q(1),Q(2) and Q(3) map to mq
+        if (Q(1) == 0) && (Q(2) == 0)
+            mq = 360 + Q(3);
+        elseif (Q(1) == 0) && (Q(2) ~= 0)
+            mq = 324 + (Q(2) - 1)*9 + Q(3) + 4;
+        elseif Q(1) ~= 0
+            mq = (Q(1)-1)*81 + (Q(2)+4)*9 + Q(3) + 4;
+        end
+        
+        %% step 6, compute Px according to A5
+        if Rc >= max(Ra, Rb)
+            Px = min(Ra, Rb);
+        else if Rc <= min(Ra, Rb)
+                Px = max(Ra, Rb);
+            else
+                Px = Ra + Rb - Rc;
+            end
+        end
+        
+        %% step 7, correct Px using C[Q] and the variable SIGN, and clamp
+        % the corrected value to the interval [0...MAXVAL] according to A6
+        if SIGN == 1
+            Px = Px + C(mq);
+        else
+            Px = Px - C(mq);
+        end
+        if Px > MAXVAL
+            Px = MAXVAL;
+        elseif Px < 0
+            Px = 0;
+        end
+        
+        %% step 8, compute the prediction error, and if necessary, invert
+        % its sign according to A7
+        Errval = Ix - Px;
+        if SIGN == -1
+            Errval = -Errval;
+        end
+        
+        %% step 9, for near-lossless coding, quantize the error and compute
+        % the reconstructed value of the current sample according to A.8.
+        % For lossless coding, update the reconstructed value by setting
+        % Rx equal to Ix.
+        Rx = Px;
+        
+        %% step 10, reduce the error to the relevant range according to A9.
+        if Errval < 0
+            Errval = Errval + RANGE;
+        end
+        if Errval >= (RANGE + 1)/2
+            Errval = Errval - RANGE;
+        end
+        
+        %% step 11, Compute the context-dependent Golomb variable k
+        % according to A10
+        for m=0:8
+            if bitsll(N(mq),m)>=A(mq)
+                k = m;
+                break;
+            end
+        end
+        
+        %% step 12, Perform the error mapping according to A11
+        if (NEAR == 0 && k == 0 && (2 * B(mq)) <= (-N(mq)))
+            if Errval >= 0
+                MErrval = 2 * Errval + 1;
+            else
+                MErrval = -2 * (Errval + 1);
+            end
+        else
+            if Errval >= 0
+                MErrval = 2 * Errval;
+            else
+                MErrval = -2 * Errval - 1;
+            end
+        end
+        
+        %% step 13, Encode the mapped error value MErrval using the limited
+        % length Golomb code function LG(k, LIMIT) according to A5.3
+        ME_binary = dec2bin(MErrval, 8);
+        MEbin_high = ME_binary(1: 8-k);         % high bits of MErrval
+        ME_low = ME_binary(8-k+1:8);         % k least significant bints
+        ME_high = bin2dec(MEbin_high);
+        if ME_high < LIMIT - qbpp - 1
+            for nl = 1: ME_high
+                encode_sequence = strcat(encode_sequence,'0');
+            end
+            encode_sequence = strcat(encode_sequence,'1');
+            encode_sequence = strcat(encode_sequence,ME_low);
+        else
+            for nl = 1: LIMIT - qbpp - 1
+                encode_sequence = strcat(encode_sequence,'0');
+            end
+            encode_sequence = strcat(encode_sequence,'1');
+            ME_low1 = dec2bin(MErrval - 1,qbpp);
+            encode_sequence = strcat(encode_sequence,ME_low1);
+        end
+        
+        %% step 14, update the variables according to A12
+        B(mq) = B(mq) + Errval*(2*NEAR + 1);
+        A(mq) = A(mq) + abs(Errval);
+        if N(mq) == RESET
+            A(mq) = bitsrl(cast(A(mq),'uint8'),1);
+            if B(mq) >= 0
+                B(mq) = bitsrl(cast(B(mq),'uint8'),1);
+            else
+                B(mq) = -bitsrl(cast(1-B(mq),'uint8'),1);
+            end
+            N(mq) = bitsrl(cast(N(mq),'uint8'),1);
+        end
+        N(mq) = N(mq) + 1;
+        
+        %% step 15, Update the prediction correction value C[Q] according
+        % to A13
+        if B(mq) <= -N(mq)
+            B(mq) = B(mq) + N(mq);
+            if C(mq) > MIN_C
+                C(mq) = C(mq) - 1;
+            end
+            if B(mq) <= -N(mq)
+                B(mq) = -N(mq) + 1;
+            end
+        elseif B(mq) > 0
+            B(mq) = B(mq) - N(mq);
+            if C(mq) < MAX_C
+                C(mq) = C(mq) + 1;
+            end
+            if B(mq) > 0
+                B(mq) = 0;
+            end
+        end
+        %% step 16, Go to step 2 to process the next sample.
+        i = i + 1;
+    end
+    
+    %% step 17, run mode coding.
+    
+    % (a) set RUNval = Ra. While (abs(Ix – RUNval) <= NEAR),
+    % increment RUNcnt, and if not at the end of a line, read a new
+    % sample. Set Rx = RUNval each time the sample x is added to
+    % the run.
+    if mode == 1
+        % initilize some parameters
+        if mod(i,width) == 0
+            EOLine = 1;
+        else
+            EOLine = 0;
+        end
+        RUNval = Ra;
+        RUNcnt = 0;
+        Ix = image(i);
+        while (Ix - RUNval == 0) && (EOLine == 0)
+            RUNcnt = RUNcnt + 1;
+            i = i + 1;
+            if mod(i,width) == 0
+                EOLine = 1;
+            else
+                EOLine = 0;
+            end
+            Ix = image(i);
+        end
+        Rx = RUNval;
+        if Ix - RUNval ~= 0
+            mode = 2;          % interruption
+        end
+    end
+    
+    if EOLine == 1
+        RUNcnt = RUNcnt + 1;
+    end
+    % (b) While RUNcnt >= 2 to J[RUNIndex], do A15
+    % i) Append ’1’ to the bit stream.
+    % ii) RUNcnt = RUNcnt –2J[RUNIndex].
+    % iii) If RUNindex < 32, then increment RUNindex by one.
+    while RUNcnt >= bitsll(1,J(RUNindex))
+        encode_sequence = strcat(encode_sequence,'1');
+        RUNcnt = RUNcnt - bitsll(1,J(RUNindex));
+        if RUNindex < 32
+            RUNindex = RUNindex + 1;
+        end
+    end
+    
+    % (c) If the run was interrupted by the end of a line: A16
+    % i) If RUNcnt > 0, append '1' to the bit stream.
+    % ii) Go to Step 16.
+    if mode == 2
+        % (d) Append '0' to the bit stream.
+        encode_sequence = strcat(encode_sequence,'0');
+        % (e) Append RUNcnt in binary representation
+        % (using J[RUNindex] bits) to the bit stream.
+        add_bin = dec2bin(RUNcnt,J(RUNindex));
+        encode_sequence = strcat(encode_sequence,add_bin);
+        % (f) If RUNindex > 0, then decrement RUNindex by one.
+        if RUNindex > 1
+            RUNindex = RUNindex - 1;
+        end
+    elseif RUNcnt > 0
+        encode_sequence = strcat(encode_sequence,'1');
+    end
+    
+    %% step 18, run interruption according to A7.2
+    if mode == 2
+        
+        if i <= width
+            Rb = 0;   Rc = 0;   Rd = 0;
+            if (mod(i,width) == 1)
+                Ra = Rb;
+            else
+                Ra = image(i-1);
+            end
+        else
+            if (mod(i,width) == 1)
+                Rb = image(i - width);
+                Ra = Rb;
+                Ra_before = Ra;
+            else
+                Ra = image(i - 1);
+                Rb = image(i - width);
+            end
+        end
+        % 1. compute the index RItype according to A17
+        if abs(Ra - Rb) <= NEAR
+            RItype = 1;
+        else
+            RItype = 0;
+        end
+        
+        % 2. compute the predicted error according to A18
+        if RItype == 1
+            Px = Ra;
+        else
+            Px = Rb;
+        end
+        Errval = Ix - Px;
+        
+        % 3. error computation for a run interruption sample according
+        % to A19
+        if (RItype == 0) && (Ra > Rb)
+            Errval = -Errval;
+            SIGN = -1;
+        else
+            SIGN = 1;
+        end
+        Rx = Ix;
+        Errval = mod(Errval,RANGE);
+        
+        % 4. compute the auxiliary variable TEMP, this variable is used
+        % for the computation of the Golomb variable k according to A20
+        if (RItype == 0)
+            TEMP = A(366);
+        else
+            TEMP = A(367) + bitsrl(cast(N(367),'uint8') , 1);
+        end
+        
+        % 5. set Q = RItype + 365. The Golomb variable k shall be
+        % computed, following the same procedure as in the regular
+        % mode according to A10, but using TEMP insteading of A[Q]
+        mq = RItype + 365 + 1;
+        for m=0:8
+            if bitsll(N(mq),m)>=TEMP
+                k = m;
+                break;
+            end
+        end
+        
+        % 6. compute the flag map according to A21, this variable
+        % influences the mapping of  Errval to non-negaive values
+        if (k == 0) && (Errval > 0) && (2*Nn(mq) < N(mq))
+            map = 1;
+        elseif (Errval < 0) && (2*Nn(mq) >= N(mq))
+            map = 1;
+        elseif (Errval < 0) && (k ~= 0)
+            map = 1;
+        else
+            map = 0;
+        end
+        
+        % 7. map Errval according to A22
+        EMErrval = 2*abs(Errval) - RItype - map;
+        
+        % 8. encode EMErrval following the same procedure as in the
+        % regular mode
+        EME_binary = dec2bin(EMErrval,8);
+        EMEbin_high = EME_binary(1: 8-k);         % high bits of MErrval
+        EME_low = EME_binary(8-k+1:8);         % k least significant bints
+        EME_high = bin2dec(EMEbin_high);
+        if EME_high < LIMIT - J(RUNindex) - 1 - qbpp - 1  % RUNindex corresponds to
+            % the value before decrement in A16
+            for nl = 1: EME_high
+                encode_sequence = strcat(encode_sequence,'0');
+            end
+            encode_sequence = strcat(encode_sequence,'1');
+            encode_sequence = strcat(encode_sequence,EME_low);
+        else
+            for nl = 1: LIMIT - qbpp - 1
+                encode_sequence = strcat(encode_sequence,'0');
+            end
+            encode_sequence = strcat(encode_sequence,'1');
+            EME_low1 = dec2bin(EMErrval - 1,qbpp);
+            encode_sequence = strcat(encode_sequence,EME_low1);
+        end
+        
+        % 9. update the variables for run interruption sample encoding,
+        % according to A23
+        if Errval < 0
+            Nn(mq) = Nn(mq) + 1;
+        end
+        A(mq) = A(mq) + bitsrl(cast((EMErrval + 1 - RItype),'uint8'),1);
+        if (N(mq) == RESET)
+            A(mq) = bitsrl(cast(A(mq),'uint8'),1);
+            N(mq) = bitsrl(cast(N(mq),'uint8'),1);
+            Nn(mq) = bitsrl(cast(Nn(mq),'uint8'),1);
+        end
+        N(mq) = N(mq) + 1;
+        
+        mode = 0;
+    end
+    i = i + 1;
+end
+
+%% To be 8 bits
+% while mod(length(encode_sequence),8) ~= 0
+%     encode_sequence = strcat(encode_sequence,'0');
+% end
+
+disp(encode_sequence);
