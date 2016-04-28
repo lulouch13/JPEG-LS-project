@@ -95,7 +95,7 @@ while i <= size
     else
         mode = 0;           % regular mode
     end
-    
+   
     %% regular mode
     if mode == 0
         
@@ -332,7 +332,7 @@ while i <= size
     % (c) If the run was interrupted by the end of a line: A16
     % i) If RUNcnt > 0, append '1' to the bit stream.
     % ii) Go to Step 16.
-    if mode == 2
+    if Ix - RUNval > NEAR
         % (d) Append '0' to the bit stream.
         encode_sequence = strcat(encode_sequence,'0');
         % (e) Append RUNcnt in binary representation
@@ -414,9 +414,9 @@ while i <= size
         
         % 6. compute the flag map according to A21, this variable
         % influences the mapping of  Errval to non-negaive values
-        if (k == 0) && (Errval > 0) && (2*Nn(mq) < N(mq))
+        if (k == 0) && (Errval > 0) && (2*Nn(mq-365) < N(mq))
             map = 1;
-        elseif (Errval < 0) && (2*Nn(mq) >= N(mq))
+        elseif (Errval < 0) && (2*Nn(mq-365) >= N(mq))
             map = 1;
         elseif (Errval < 0) && (k ~= 0)
             map = 1;
@@ -472,4 +472,4 @@ end
 %     encode_sequence = strcat(encode_sequence,'0');
 % end
 
-disp(encode_sequence);
+ disp(encode_sequence);
